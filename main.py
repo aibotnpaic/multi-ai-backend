@@ -1,93 +1,103 @@
-from fastapi import FastAPI, Form, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
-import httpx, base64, os, json
+from fastapi import FastAPI, Request
+from pydantic import BaseModel
+from typing import List, Optional, Dict
+import logging
+import httpx
+import os
 
 app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
-# Env Keys
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+# Define request model
+class AskRequest(BaseModel):
+    query: str
+    models: List[str]
+
+# Get API keys from environment variables
+API_KEYS = {
+    "gpt": os.getenv("GPT_API_KEY"),
+    "gemini": os.getenv("GEMINI_API_KEY"),
+    "deepseek": os.getenv("DEEPSEEK_API_KEY"),
+    "mistral": os.getenv("MISTRAL_API_KEY")
+}
+
+# Dummy API endpoints for each provider (replace with actual)
+MODEL_ENDPOINTS = {
+    "gpt": "https://api.openai.com/v1/chat/completions",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent",
+    "deepseek": "https://api.deepseek.com/v1/chat/completions",
+    "mistral": "https://api.mistral.ai/v1/chat/completions"
+}
+
+# Dummy request builders (adjust per real API)
+def build_payload(model_name: str, query: str):
+    if model_name in {"gpt", "deepseek", "mistral"}:
+        return {
+            "model": "gpt-3.5-turbo",  # Adjust model per provider
+            "messages": [{"role": "user", "content": query}],
+            "temperature": 0.7
+        }
+    elif model_name == "gemini":
+        return {
+            "contents": [{"parts": [{"text": query}]}]
+        }
+    else:
+        return {}
+
+def build_headers(model_name: str, api_key: str):
+    if model_name == "gemini":
+        return {"Content-Type": "application/json"}
+    return {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+
+# Call each model
+async def call_model(model: str, query: str) -> str:
+    api_key = API_KEYS.get(model)
+    url = MODEL_ENDPOINTS.get(model)
+
+    if not api_key or not url:
+        return f"[{model.upper()}] Missing API key or URL."
+
+    payload = build_payload(model, query)
+    headers = build_headers(model, api_key)
+
+    # Add API key to URL for Gemini
+    if model == "gemini":
+        url += f"?key={api_key}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            res = await client.post(url, json=payload, headers=headers)
+            res.raise_for_status()
+            data = res.json()
+
+            # Extract response text based on model
+            if model == "gemini":
+                return data['candidates'][0]['content']['parts'][0]['text']
+            else:
+                return data['choices'][0]['message']['content']
+    except Exception as e:
+        return f"[{model.upper()}] Error: {str(e)}"
+
+# Endpoint
 @app.post("/ask")
-async def ask_models(
-    query: str = Form(...),
-    models: str = Form(...),
-    image: Optional[UploadFile] = File(None)
-):
-    selected = json.loads(models)
-    responses = {}
-    async with httpx.AsyncClient() as client:
-        # Optional Image Handling
-        if image:
-            image_bytes = await image.read()
-            base64_image = base64.b64encode(image_bytes).decode("utf-8")
-            img_part = [{"inline_data": {"mime_type": image.content_type, "data": base64_image}},
-                        {"text": query}]
-        else:
-            img_part = [{"text": query}]
+async def ask_models(request: AskRequest):
+    logger.info(f"Received query: {request.query} for models: {request.models}")
 
-        # GPT
-        if "gpt" in selected:
-            try:
-                r = await client.post("https://api.openai.com/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                    json={"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": query}], "temperature": 0.7})
-                responses["gpt"] = r.json()["choices"][0]["message"]["content"]
-            except Exception as e:
-                responses["gpt"] = f"Error: {str(e)}"
+    results = {}
+    for model in request.models:
+        answer = await call_model(model, request.query)
+        results[model] = answer
 
-        # Gemini
-        if "gemini" in selected:
-            try:
-                model = "gemini-pro-vision" if image else "gemini-pro"
-                r = await client.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}",
-                    json={"contents": [{"parts": img_part}]})
-                responses["gemini"] = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            except Exception as e:
-                responses["gemini"] = f"Error: {str(e)}"
+    # Combine for summary
+    summary = "\n\n".join(f"{m.upper()}:\n{a}" for m, a in results.items())
 
-        # DeepSeek
-        if "deepseek" in selected:
-            try:
-                r = await client.post("https://api.deepseek.com/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}"},
-                    json={"model": "deepseek-chat", "messages": [{"role": "user", "content": query}]})
-                responses["deepseek"] = r.json()["choices"][0]["message"]["content"]
-            except Exception as e:
-                responses["deepseek"] = f"Error: {str(e)}"
-
-        # Mistral
-        if "mistral" in selected:
-            try:
-                r = await client.post("https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {MISTRAL_API_KEY}",
-                        "HTTP-Referer": "https://yourdomain.com",
-                        "X-Title": "OmniAI"
-                    },
-                    json={"model": "mistralai/mistral-7b-instruct", "messages": [{"role": "user", "content": query}]})
-                responses["mistral"] = r.json()["choices"][0]["message"]["content"]
-            except Exception as e:
-                responses["mistral"] = f"Error: {str(e)}"
-
-        # Summary (GPT-based)
-        try:
-            summary_prompt = f"User query: {query}\n\n" + "\n".join([f"{k.upper()}: {v}" for k,v in responses.items()]) + "\n\nSummarize in 3-5 bullet points."
-            r = await client.post("https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                json={"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": summary_prompt}], "temperature": 0.5})
-            responses["summary"] = r.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            responses["summary"] = f"Error: {str(e)}"
-
-    return responses
+    return {
+        "responses": results,
+        "summary": summary
+    }
