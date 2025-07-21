@@ -1,20 +1,26 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict
-import os
-import logging
 import httpx
+import logging
+import os
 
-app = FastAPI()
-
-# Setup logging
+# Initialize logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Define request model
+app = FastAPI()
+
+# Request model
 class AskRequest(BaseModel):
     query: str
     models: List[str]
+
+# Your environment variables
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 
 @app.post("/ask")
 async def ask_models(data: AskRequest):
@@ -24,102 +30,90 @@ async def ask_models(data: AskRequest):
 
     responses: Dict[str, str] = {}
 
-    # === GPT (OpenAI) ===
-    if "gpt" in models:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            responses["gpt"] = "[GPT] Missing API key."
-        else:
-            try:
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "model": "gpt-3.5-turbo",
-                    "messages": [{"role": "user", "content": query}],
-                    "temperature": 0.7
-                }
-                async with httpx.AsyncClient(timeout=30) as client:
-                    r = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
-                    res = r.json()
-                    responses["gpt"] = res.get("choices", [{}])[0].get("message", {}).get("content", "[GPT] No response.")
-            except Exception as e:
-                responses["gpt"] = f"[GPT] Error: {e}"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        if "gpt" in models:
+            if not OPENAI_API_KEY:
+                responses["gpt"] = "[GPT] Missing API key or URL."
+            else:
+                try:
+                    gpt_response = await client.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {OPENAI_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": "gpt-3.5-turbo",
+                            "messages": [{"role": "user", "content": query}],
+                        },
+                    )
+                    gpt_data = gpt_response.json()
+                    responses["gpt"] = gpt_data["choices"][0]["message"]["content"]
+                except Exception as e:
+                    responses["gpt"] = f"[GPT] Error: {str(e)}"
 
-    # === Gemini ===
-    if "gemini" in models:
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            responses["gemini"] = "[GEMINI] Missing API key."
-        else:
-            try:
-                url = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={api_key}"
-                headers = {"Content-Type": "application/json"}
-                payload = {
-                    "contents": [
-                        {
-                            "role": "user",
-                            "parts": [{"text": query}]
-                        }
-                    ]
-                }
-                async with httpx.AsyncClient(timeout=30) as client:
-                    r = await client.post(url, headers=headers, json=payload)
-                    res = r.json()
-                    responses["gemini"] = res.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "[GEMINI] No response.")
-            except Exception as e:
-                responses["gemini"] = f"[GEMINI] Error: {e}"
+        if "gemini" in models:
+            if not GEMINI_API_KEY:
+                responses["gemini"] = "[GEMINI] Missing API key."
+            else:
+                try:
+                    gemini_response = await client.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}",
+                        json={"contents": [{"parts": [{"text": query}]}]},
+                    )
+                    gemini_data = gemini_response.json()
+                    responses["gemini"] = gemini_data["candidates"][0]["content"]["parts"][0]["text"]
+                except Exception as e:
+                    responses["gemini"] = f"[GEMINI] Error: {str(e)}"
 
-    # === DeepSeek ===
-    if "deepseek" in models:
-        api_key = os.getenv("DEEPSEEK_API_KEY")
-        if not api_key:
-            responses["deepseek"] = "[DEEPSEEK] Missing API key."
-        else:
-            try:
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "model": "deepseek-chat",
-                    "messages": [{"role": "user", "content": query}],
-                    "temperature": 0.7
-                }
-                async with httpx.AsyncClient(timeout=30) as client:
-                    r = await client.post("https://api.deepseek.com/v1/chat/completions", headers=headers, json=payload)
-                    res = r.json()
-                    responses["deepseek"] = res.get("choices", [{}])[0].get("message", {}).get("content", "[DEEPSEEK] No response.")
-            except Exception as e:
-                responses["deepseek"] = f"[DEEPSEEK] Error: {e}"
+        if "deepseek" in models:
+            if not DEEPSEEK_API_KEY:
+                responses["deepseek"] = "[DEEPSEEK] Missing API key."
+            else:
+                try:
+                    deepseek_response = await client.post(
+                        "https://api.deepseek.com/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": "deepseek-chat",
+                            "messages": [{"role": "user", "content": query}],
+                        },
+                    )
+                    deepseek_data = deepseek_response.json()
+                    responses["deepseek"] = deepseek_data["choices"][0]["message"]["content"]
+                except Exception as e:
+                    responses["deepseek"] = f"[DEEPSEEK] Error: {str(e)}"
 
-    # === Mistral ===
-    if "mistral" in models:
-        api_key = os.getenv("MISTRAL_API_KEY")
-        if not api_key:
-            responses["mistral"] = "[MISTRAL] Missing API key."
-        else:
-            try:
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "model": "mistral-tiny",
-                    "messages": [{"role": "user", "content": query}],
-                    "temperature": 0.7
-                }
-                async with httpx.AsyncClient(timeout=30) as client:
-                    r = await client.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload)
-                    res = r.json()
-                    responses["mistral"] = res.get("choices", [{}])[0].get("message", {}).get("content", "[MISTRAL] No response.")
-            except Exception as e:
-                responses["mistral"] = f"[MISTRAL] Error: {e}"
+        if "mistral" in models:
+            if not MISTRAL_API_KEY:
+                responses["mistral"] = "[MISTRAL] Missing API key."
+            else:
+                try:
+                    mistral_response = await client.post(
+                        "https://api.mistral.ai/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {MISTRAL_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": "mistral-tiny",
+                            "messages": [{"role": "user", "content": query}],
+                        },
+                    )
+                    mistral_data = mistral_response.json()
+                    responses["mistral"] = mistral_data["choices"][0]["message"]["content"]
+                except Exception as e:
+                    responses["mistral"] = f"[MISTRAL] Error: {str(e)}"
 
-    # === Summary ===
-    summary = "\n\n".join(f"{model.upper()}:\n{resp}" for model, resp in responses.items())
+    # Combine summary
+    summary = "\n\n".join(
+        f"{model.upper()}:\n{response}" for model, response in responses.items()
+    )
+
     return {
         "responses": responses,
-        "summary": summary
+        "summary": summary,
     }
